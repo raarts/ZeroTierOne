@@ -37,8 +37,12 @@
 #include "../../node/Defaults.hpp"
 #include "../../node/Utils.hpp"
 
+#include "../../control/NodeControlClient.hpp"
+#include "../../control/NodeControlService.hpp"
+
 #include "../../osnet/WindowsEthernetTapFactory.hpp"
 #include "../../osnet/WindowsRoutingTable.hpp"
+#include "../../osnet/NativeSocketManager.hpp"
 
 #pragma endregion // Includes
 
@@ -82,15 +86,20 @@ void ZeroTierOneService::threadMain()
 
 restart_node:
 	try {
+		std::string authToken(ZeroTier::NodeControlClient::getAuthToken((ZeroTier::ZT_DEFAULTS.defaultHomePath + ZT_PATH_SEPARATOR_S + "authtoken.secret").c_str(),true));
+
 		ZeroTier::WindowsEthernetTapFactory tapFactory(ZeroTier::ZT_DEFAULTS.defaultHomePath.c_str());
 		ZeroTier::WindowsRoutingTable routingTable;
+		ZeroTier::NativeSocketManager socketManager(ZT_DEFAULT_UDP_PORT,0);
 
 		{
 			// start or restart
 			ZeroTier::Mutex::Lock _l(_lock);
 			delete _node;
-			_node = new ZeroTier::Node(ZeroTier::ZT_DEFAULTS.defaultHomePath.c_str(),&tapFactory,&routingTable,ZT_DEFAULT_UDP_PORT,0,false);
+			_node = new ZeroTier::Node(ZeroTier::ZT_DEFAULTS.defaultHomePath.c_str(),&tapFactory,&routingTable,&socketManager,false,(const char *)0);
 		}
+
+		ZeroTier::NodeControlService controlService(_node,authToken.c_str());
 
 		switch(_node->run()) {
 
@@ -106,7 +115,7 @@ restart_node:
 				// Get upgrade path, which will be its reason for termination
 				std::string msiPath;
 				if (n) {
-					const char *msiPathTmp = n->reasonForTermination();
+					const char *msiPathTmp = n->terminationMessage();
 					if (msiPathTmp)
 						msiPath = msiPathTmp;
 				}
@@ -131,7 +140,7 @@ restart_node:
 
 			case ZeroTier::Node::NODE_UNRECOVERABLE_ERROR: {
 				std::string err("ZeroTier node encountered an unrecoverable error: ");
-				const char *r = _node->reasonForTermination();
+				const char *r = _node->terminationMessage();
 				if (r)
 					err.append(r);
 				else err.append("(unknown error)");

@@ -32,17 +32,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <stdexcept>
-#include <queue>
 #include <string>
 
 #include "../node/Constants.hpp"
 #include "../node/EthernetTap.hpp"
-#include "../node/AtomicCounter.hpp"
-#include "../node/SharedPtr.hpp"
 #include "../node/Thread.hpp"
 #include "../node/Mutex.hpp"
-#include "../node/Condition.hpp"
+
+#include "MTQ.hpp"
 
 namespace ZeroTier {
 
@@ -58,30 +55,29 @@ class TestEthernetTapFactory;
  */
 class TestEthernetTap : public EthernetTap
 {
-	friend class SharedPtr<TestEthernetTap>;
-
-private:
+public:
 	struct TestFrame
 	{
-		TestFrame() : from(),to(),etherType(0),len(0) {}
+		TestFrame() : from(),to(),timestamp(0),etherType(0),len(0) {}
 		TestFrame(const MAC &f,const MAC &t,const void *d,unsigned int et,unsigned int l) :
 			from(f),
 			to(t),
+			timestamp(Utils::now()),
 			etherType(et),
 			len(l)
 		{
 			memcpy(data,d,l);
 		}
+
 		MAC from;
 		MAC to;
+		uint64_t timestamp;
 		unsigned int etherType;
 		unsigned int len;
 		char data[4096];
 	};
 
-public:
 	TestEthernetTap(
-		TestEthernetTapFactory *parent,
 		const MAC &mac,
 		unsigned int mtu,
 		unsigned int metric,
@@ -104,11 +100,14 @@ public:
 	virtual bool updateMulticastGroups(std::set<MulticastGroup> &groups);
 	virtual bool injectPacketFromHost(const MAC &from,const MAC &to,unsigned int etherType,const void *data,unsigned int len);
 
+	inline uint64_t nwid() const { return _nwid; }
+	inline bool getNextReceivedFrame(TestFrame &v,unsigned long timeout) { return _gq.pop(v,timeout); }
+
 	void threadMain()
 		throw();
 
 private:
-	TestEthernetTapFactory *_parent;
+	uint64_t _nwid;
 
 	void (*_handler)(void *,const MAC &,const MAC &,unsigned int,const Buffer<4096> &);
 	void *_arg;
@@ -116,11 +115,8 @@ private:
 	std::string _dev;
 	volatile bool _enabled;
 
-	std::queue< TestFrame > _pq;
-	Mutex _pq_m;
-	Condition _pq_c;
-
-	AtomicCounter __refCount;
+	MTQ<TestFrame> _pq;
+	MTQ<TestFrame> _gq;
 };
 
 } // namespace ZeroTier

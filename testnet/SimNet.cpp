@@ -25,39 +25,44 @@
  * LLC. Start here: http://www.zerotier.com/
  */
 
-#ifndef ZT_UDPSOCKET_HPP
-#define ZT_UDPSOCKET_HPP
+#include "SimNet.hpp"
 
-#include "Socket.hpp"
+#include "../node/Constants.hpp"
+#include "../node/Utils.hpp"
 
 namespace ZeroTier {
 
-class SocketManager;
-
-/**
- * Locally bound UDP socket
- */
-class UdpSocket : public Socket
+SimNet::SimNet()
 {
-	friend class SharedPtr<Socket>;
-	friend class SocketManager;
+}
 
-public:
-	virtual ~UdpSocket();
-	virtual bool send(const InetAddress &to,const void *msg,unsigned int msglen);
+SimNet::~SimNet()
+{
+}
 
-protected:
-#ifdef __WINDOWS__
-	UdpSocket(Type t,SOCKET s) :
-#else
-	UdpSocket(Type t,int s) :
-#endif
-		Socket(t,s) {}
+SimNetSocketManager *SimNet::newEndpoint(const InetAddress &addr)
+{
+	Mutex::Lock _l(_lock);
 
-	virtual bool notifyAvailableForRead(const SharedPtr<Socket> &self,SocketManager *sm);
-	virtual bool notifyAvailableForWrite(const SharedPtr<Socket> &self,SocketManager *sm);
-};
+	if (_endpoints.size() >= ZT_SIMNET_MAX_TESTNET_SIZE)
+		return (SimNetSocketManager *)0;
+	if (_endpoints.find(addr) != _endpoints.end())
+		return (SimNetSocketManager *)0;
+
+	SimNetSocketManager *sm = new SimNetSocketManager();
+	sm->_sn = this;
+	sm->_address = addr;
+	_endpoints[addr] = sm;
+	return sm;
+}
+
+SimNetSocketManager *SimNet::get(const InetAddress &addr)
+{
+	Mutex::Lock _l(_lock);
+	std::map< InetAddress,SimNetSocketManager * >::iterator ep(_endpoints.find(addr));
+	if (ep == _endpoints.end())
+		return (SimNetSocketManager *)0;
+	return ep->second;
+}
 
 } // namespace ZeroTier
-
-#endif

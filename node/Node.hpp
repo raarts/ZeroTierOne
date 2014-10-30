@@ -36,6 +36,7 @@ namespace ZeroTier {
 
 class EthernetTapFactory;
 class RoutingTable;
+class SocketManager;
 
 /**
  * A ZeroTier One node
@@ -85,8 +86,7 @@ public:
 	 * @param hp Home directory path or NULL for system-wide default for this platform
 	 * @param tf Ethernet tap factory for platform network stack
 	 * @param rt Routing table interface for platform network stack
-	 * @param udpPort UDP port or 0 to disable
-	 * @param tcpPort TCP port or 0 to disable
+	 * @param sm Socket manager for physical network I/O
 	 * @param resetIdentity If true, delete identity before starting and regenerate
 	 * @param overrideRootTopology Override root topology with this dictionary (in string serialized format) and do not update (default: NULL for none)
 	 */
@@ -94,8 +94,7 @@ public:
 		const char *hp,
 		EthernetTapFactory *tf,
 		RoutingTable *rt,
-		unsigned int udpPort,
-		unsigned int tcpPort,
+		SocketManager *sm,
 		bool resetIdentity,
 		const char *overrideRootTopology = (const char *)0) throw();
 
@@ -177,7 +176,7 @@ public:
 		throw();
 
 	/**
-	 * Leave a network
+	 * Leave a network (if a member)
 	 *
 	 * @param nwid 64-bit network ID
 	 */
@@ -226,23 +225,6 @@ public:
 	 */
 	bool updateCheck()
 		throw();
-
-	/**
-	 * Inject a packet into a network's tap as if it came from the host
-	 *
-	 * This is primarily for debugging, and at the moment is only supported on
-	 * the test/dummy Ethernet tap implementation. Attempting to use it for real
-	 * devices will fail and return 'false.'
-	 *
-	 * @param nwid Network ID
-	 * @param from Source MAC address (must be 6 bytes in length)
-	 * @param to Destination MAC address (must be 6 bytes in length)
-	 * @param etherType Ethernet frame type
-	 * @param data Frame data
-	 * @param len Length of frame in bytes
-	 * @return True on success; false if not a member of network, injection not supported, or data too large
-	 */
-	bool injectPacketFromHost(uint64_t nwid,const unsigned char *from,const unsigned char *to,unsigned int etherType,const void *data,unsigned int len);
 
 	static const char *versionString() throw();
 	static unsigned int versionMajor() throw();

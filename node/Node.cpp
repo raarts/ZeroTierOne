@@ -84,8 +84,6 @@ struct _NodeImpl
 {
 	RuntimeEnvironment renv;
 
-	unsigned int udpPort,tcpPort;
-
 	std::string reasonForTerminationStr;
 	volatile Node::ReasonForTermination reasonForTermination;
 
@@ -101,9 +99,6 @@ struct _NodeImpl
 		RuntimeEnvironment *RR = &renv;
 		LOG("terminating: %s",reasonForTerminationStr.c_str());
 
-		renv.shutdownInProgress = true;
-		Thread::sleep(500);
-
 		running = false;
 
 #ifndef __WINDOWS__
@@ -112,10 +107,9 @@ struct _NodeImpl
 		delete renv.updater;  renv.updater = (SoftwareUpdater *)0;
 		delete renv.nc;       renv.nc = (NodeConfig *)0;            // shut down all networks, close taps, etc.
 		delete renv.topology; renv.topology = (Topology *)0;        // now we no longer need routing info
-		delete renv.sm;       renv.sm = (SocketManager *)0;         // close all sockets
-		delete renv.sw;       renv.sw = (Switch *)0;                // order matters less from here down
 		delete renv.mc;       renv.mc = (Multicaster *)0;
 		delete renv.antiRec;  renv.antiRec = (AntiRecursion *)0;
+		delete renv.sw;       renv.sw = (Switch *)0;                // order matters less from here down
 		delete renv.http;     renv.http = (HttpClient *)0;
 		delete renv.prng;     renv.prng = (CMWC4096 *)0;
 		delete renv.log;      renv.log = (Logger *)0;               // but stop logging last of all
@@ -222,8 +216,7 @@ Node::Node(
 	const char *hp,
 	EthernetTapFactory *tf,
 	RoutingTable *rt,
-	unsigned int udpPort,
-	unsigned int tcpPort,
+	SocketManager *sm,
 	bool resetIdentity,
 	const char *overrideRootTopology) throw() :
 	_impl(new _NodeImpl)
@@ -236,6 +229,7 @@ Node::Node(
 
 	impl->renv.tapFactory = tf;
 	impl->renv.routingTable = rt;
+	impl->renv.sm = sm;
 
 	if (resetIdentity) {
 		// Forget identity and peer database, peer keys, etc.
@@ -255,8 +249,6 @@ Node::Node(
 		}
 	}
 
-	impl->udpPort = udpPort & 0xffff;
-	impl->tcpPort = tcpPort & 0xffff;
 	impl->reasonForTermination = Node::NODE_RUNNING;
 	impl->started = false;
 	impl->running = false;
@@ -277,16 +269,12 @@ Node::~Node()
 
 static void _CBztTraffic(const SharedPtr<Socket> &fromSock,void *arg,const InetAddress &from,Buffer<ZT_SOCKET_MAX_MESSAGE_LEN> &data)
 {
-	const RuntimeEnvironment *RR = (const RuntimeEnvironment *)arg;
-	if ((RR->sw)&&(!RR->shutdownInProgress))
-		RR->sw->onRemotePacket(fromSock,from,data);
+	((const RuntimeEnvironment *)arg)->sw->onRemotePacket(fromSock,from,data);
 }
 
 static void _cbHandleGetRootTopology(void *arg,int code,const std::string &url,const std::string &body)
 {
 	RuntimeEnvironment *RR = (RuntimeEnvironment *)arg;
-	if (RR->shutdownInProgress)
-		return;
 
 	if ((code != 200)||(body.length() == 0)) {
 		TRACE("failed to retrieve %s",url.c_str());
@@ -397,10 +385,9 @@ Node::ReasonForTermination Node::run()
 		}
 
 		RR->http = new HttpClient();
-		RR->antiRec = new AntiRecursion();
-		RR->mc = new Multicaster(RR);
 		RR->sw = new Switch(RR);
-		RR->sm = new SocketManager(impl->udpPort,impl->tcpPort,&_CBztTraffic,RR);
+		RR->mc = new Multicaster(RR);
+		RR->antiRec = new AntiRecursion();
 		RR->topology = new Topology(RR);
 		try {
 			RR->nc = new NodeConfig(RR);
@@ -666,7 +653,7 @@ Node::ReasonForTermination Node::run()
 			try {
 				unsigned long delay = std::min((unsigned long)ZT_MAX_SERVICE_LOOP_INTERVAL,RR->sw->doTimerTasks());
 				uint64_t start = Utils::now();
-				RR->sm->poll(delay);
+				RR->sm->poll(delay,&_CBztTraffic,RR);
 				lastDelayDelta = (long)(Utils::now() - start) - (long)delay; // used to detect sleep/wake
 			} catch (std::exception &exc) {
 				LOG("unexpected exception running Switch doTimerTasks: %s",exc.what());
@@ -709,9 +696,9 @@ bool Node::online()
 	throw()
 {
 	_NodeImpl *impl = (_NodeImpl *)_impl;
-	if (!impl->running)
-		return false;
 	RuntimeEnvironment *RR = (RuntimeEnvironment *)&(impl->renv);
+	if ((!RR)||(!RR->initialized))
+		return false;
 	uint64_t now = Utils::now();
 	uint64_t since = RR->timeOfLastResynchronize;
 	std::vector< SharedPtr<Peer> > snp(RR->topology->supernodePeers());
@@ -760,7 +747,8 @@ void Node::join(uint64_t nwid)
 {
 	_NodeImpl *impl = (_NodeImpl *)_impl;
 	RuntimeEnvironment *RR = (RuntimeEnvironment *)&(impl->renv);
-	RR->nc->join(nwid);
+	if ((RR)&&(RR->initialized))
+		RR->nc->join(nwid);
 }
 
 void Node::leave(uint64_t nwid)
@@ -768,7 +756,8 @@ void Node::leave(uint64_t nwid)
 {
 	_NodeImpl *impl = (_NodeImpl *)_impl;
 	RuntimeEnvironment *RR = (RuntimeEnvironment *)&(impl->renv);
-	RR->nc->leave(nwid);
+	if ((RR)&&(RR->initialized))
+		RR->nc->leave(nwid);
 }
 
 struct GatherPeerStatistics
@@ -792,6 +781,9 @@ void Node::status(ZT1_Node_Status *status)
 
 	memset(status,0,sizeof(ZT1_Node_Status));
 
+	if ((!RR)||(!RR->initialized))
+		return;
+
 	Utils::scopy(status->publicIdentity,sizeof(status->publicIdentity),RR->identity.toString(false).c_str());
 	RR->identity.address().toString(status->address,sizeof(status->address));
 	status->rawAddress = RR->identity.address().toInt();
@@ -814,6 +806,7 @@ void Node::status(ZT1_Node_Status *status)
 
 	status->online = online();
 	status->running = impl->running;
+	status->initialized = true;
 }
 
 struct CollectPeersAndPaths
@@ -831,13 +824,16 @@ ZT1_Node_PeerList *Node::listPeers()
 	_NodeImpl *impl = (_NodeImpl *)_impl;
 	RuntimeEnvironment *RR = (RuntimeEnvironment *)&(impl->renv);
 
+	if ((!RR)||(!RR->initialized))
+		return (ZT1_Node_PeerList *)0;
+
 	CollectPeersAndPaths pp;
 	RR->topology->eachPeer<CollectPeersAndPaths &>(pp);
 	std::sort(pp.data.begin(),pp.data.end(),SortPeersAndPathsInAscendingAddressOrder());
 
 	unsigned int returnBufSize = sizeof(ZT1_Node_PeerList);
 	for(std::vector< std::pair< SharedPtr<Peer>,std::vector<Path> > >::iterator p(pp.data.begin());p!=pp.data.end();++p)
-		returnBufSize += sizeof(ZT1_Node_Peer) + (sizeof(ZT1_Node_PhysicalPath) * p->second.size());
+		returnBufSize += sizeof(ZT1_Node_Peer) + (sizeof(ZT1_Node_PhysicalPath) * (unsigned int)p->second.size());
 
 	char *buf = (char *)::malloc(returnBufSize);
 	if (!buf)
@@ -859,7 +855,7 @@ ZT1_Node_PeerList *Node::listPeers()
 		p->first->address().toString(prec->address,sizeof(prec->address));
 		prec->rawAddress = p->first->address().toInt();
 		prec->latency = p->first->latency();
-		prec->role = RR->topology->isSupernode(p->first->address()) ? ZT1_Node_Peer::ZT1_Node_Peer_SUPERNODE : ZT1_Node_Peer::ZT1_Node_Peer_NODE;
+		prec->role = RR->topology->isSupernode(p->first->address()) ? ZT1_Node_Peer_SUPERNODE : ZT1_Node_Peer_NODE;
 
 		prec->paths = (ZT1_Node_PhysicalPath *)buf;
 		buf += sizeof(ZT1_Node_PhysicalPath) * p->second.size();
@@ -867,13 +863,13 @@ ZT1_Node_PeerList *Node::listPeers()
 		prec->numPaths = 0;
 		for(std::vector<Path>::iterator pi(p->second.begin());pi!=p->second.end();++pi) {
 			ZT1_Node_PhysicalPath *path = &(prec->paths[prec->numPaths++]);
-			path->type = static_cast<typeof(path->type)>(pi->type());
+			path->type = (ZT1_Node_PhysicalPathType)pi->type();
 			if (pi->address().isV6()) {
-				path->address.type = ZT1_Node_PhysicalAddress::ZT1_Node_PhysicalAddress_TYPE_IPV6;
+				path->address.type = ZT1_Node_PhysicalAddress_TYPE_IPV6;
 				memcpy(path->address.bits,pi->address().rawIpData(),16);
 				// TODO: zoneIndex not supported yet, but should be once echo-location works w/V6
 			} else {
-				path->address.type = ZT1_Node_PhysicalAddress::ZT1_Node_PhysicalAddress_TYPE_IPV4;
+				path->address.type = ZT1_Node_PhysicalAddress_TYPE_IPV4;
 				memcpy(path->address.bits,pi->address().rawIpData(),4);
 			}
 			path->address.port = pi->address().port();
@@ -906,7 +902,7 @@ static void _fillNetworkQueryResultBuffer(const SharedPtr<Network> &network,cons
 	if (lcu > 0)
 		nbuf->configAge = (long)(Utils::now() - lcu);
 	else nbuf->configAge = -1;
-	nbuf->status = static_cast<typeof(nbuf->status)>(network->status());
+	nbuf->status = (ZT1_Node_NetworkStatus)network->status();
 	nbuf->enabled = network->enabled();
 	nbuf->isPrivate = (nconf) ? nconf->isPrivate() : true;
 }
@@ -916,6 +912,9 @@ ZT1_Node_Network *Node::getNetworkStatus(uint64_t nwid)
 {
 	_NodeImpl *impl = (_NodeImpl *)_impl;
 	RuntimeEnvironment *RR = (RuntimeEnvironment *)&(impl->renv);
+
+	if ((!RR)||(!RR->initialized))
+		return (ZT1_Node_Network *)0;
 
 	SharedPtr<Network> network(RR->nc->network(nwid));
 	if (!network)
@@ -938,10 +937,10 @@ ZT1_Node_Network *Node::getNetworkStatus(uint64_t nwid)
 	for(std::set<InetAddress>::iterator ip(ips.begin());ip!=ips.end();++ip) {
 		ZT1_Node_PhysicalAddress *ipb = &(nbuf->ips[nbuf->numIps++]);
 		if (ip->isV6()) {
-			ipb->type = ZT1_Node_PhysicalAddress::ZT1_Node_PhysicalAddress_TYPE_IPV6;
+			ipb->type = ZT1_Node_PhysicalAddress_TYPE_IPV6;
 			memcpy(ipb->bits,ip->rawIpData(),16);
 		} else {
-			ipb->type = ZT1_Node_PhysicalAddress::ZT1_Node_PhysicalAddress_TYPE_IPV4;
+			ipb->type = ZT1_Node_PhysicalAddress_TYPE_IPV4;
 			memcpy(ipb->bits,ip->rawIpData(),4);
 		}
 		ipb->port = ip->port();
@@ -957,6 +956,9 @@ ZT1_Node_NetworkList *Node::listNetworks()
 	_NodeImpl *impl = (_NodeImpl *)_impl;
 	RuntimeEnvironment *RR = (RuntimeEnvironment *)&(impl->renv);
 
+	if ((!RR)||(!RR->initialized))
+		return (ZT1_Node_NetworkList *)0;
+
 	std::vector< SharedPtr<Network> > networks(RR->nc->networks());
 	std::vector< SharedPtr<NetworkConfig> > nconfs(networks.size());
 	std::vector< std::set<InetAddress> > ipsv(networks.size());
@@ -965,7 +967,7 @@ ZT1_Node_NetworkList *Node::listNetworks()
 	for(unsigned long i=0;i<networks.size();++i) {
 		nconfs[i] = networks[i]->config2();
 		ipsv[i] = networks[i]->ips();
-		returnBufSize += sizeof(ZT1_Node_Network) + (sizeof(ZT1_Node_PhysicalAddress) * ipsv[i].size());
+		returnBufSize += sizeof(ZT1_Node_Network) + (sizeof(ZT1_Node_PhysicalAddress) * (unsigned int)ipsv[i].size());
 	}
 
 	char *buf = (char *)::malloc(returnBufSize);
@@ -991,10 +993,10 @@ ZT1_Node_NetworkList *Node::listNetworks()
 		for(std::set<InetAddress>::iterator ip(ipsv[i].begin());ip!=ipsv[i].end();++ip) {
 			ZT1_Node_PhysicalAddress *ipb = &(nbuf->ips[nbuf->numIps++]);
 			if (ip->isV6()) {
-				ipb->type = ZT1_Node_PhysicalAddress::ZT1_Node_PhysicalAddress_TYPE_IPV6;
+				ipb->type = ZT1_Node_PhysicalAddress_TYPE_IPV6;
 				memcpy(ipb->bits,ip->rawIpData(),16);
 			} else {
-				ipb->type = ZT1_Node_PhysicalAddress::ZT1_Node_PhysicalAddress_TYPE_IPV4;
+				ipb->type = ZT1_Node_PhysicalAddress_TYPE_IPV4;
 				memcpy(ipb->bits,ip->rawIpData(),4);
 			}
 			ipb->port = ip->port();
@@ -1021,22 +1023,6 @@ bool Node::updateCheck()
 		RR->updater->checkNow();
 		return true;
 	}
-	return false;
-}
-
-bool Node::injectPacketFromHost(uint64_t nwid,const unsigned char *from,const unsigned char *to,unsigned int etherType,const void *data,unsigned int len)
-{
-	if (!running())
-		return false;
-	if ((!from)||(!to))
-		return false;
-
-	_NodeImpl *impl = (_NodeImpl *)_impl;
-	RuntimeEnvironment *RR = (RuntimeEnvironment *)&(impl->renv);
-
-	SharedPtr<Network> network(RR->nc->network(nwid));
-	if (network)
-		return network->tapInjectPacketFromHost(MAC(from,6),MAC(to,6),etherType,data,len);
 	return false;
 }
 

@@ -32,11 +32,9 @@
 #include <string>
 #include <set>
 
-#include "../node/SharedPtr.hpp"
 #include "../node/EthernetTapFactory.hpp"
 #include "../node/Mutex.hpp"
 #include "../node/MAC.hpp"
-#include "../node/CMWC4096.hpp"
 #include "TestEthernetTap.hpp"
 
 namespace ZeroTier {
@@ -59,59 +57,33 @@ public:
 
 	virtual void close(EthernetTap *tap,bool destroyPersistentDevices);
 
-	inline SharedPtr<TestEthernetTap> getByMac(const MAC &mac) const
+	inline TestEthernetTap *getByMac(const MAC &mac) const
 	{
 		Mutex::Lock _l(_tapsByMac_m);
-		std::map< MAC,SharedPtr<TestEthernetTap> >::const_iterator t(_tapsByMac.find(mac));
+		std::map< MAC,TestEthernetTap * >::const_iterator t(_tapsByMac.find(mac));
 		if (t == _tapsByMac.end())
-			return SharedPtr<TestEthernetTap>();
+			return (TestEthernetTap *)0;
 		return t->second;
 	}
 
-	inline SharedPtr<TestEthernetTap> getByDevice(const std::string &dev) const
+	inline TestEthernetTap *getByNwid(uint64_t nwid) const
 	{
-		Mutex::Lock _l(_tapsByDevice_m);
-		std::map< std::string,SharedPtr<TestEthernetTap> >::const_iterator t(_tapsByDevice.find(dev));
-		if (t == _tapsByDevice.end())
-			return SharedPtr<TestEthernetTap>();
+		Mutex::Lock _l(_tapsByNwid_m);
+		std::map< uint64_t,TestEthernetTap * >::const_iterator t(_tapsByNwid.find(nwid));
+		if (t == _tapsByNwid.end())
+			return (TestEthernetTap *)0;
 		return t->second;
-	}
-
-	inline SharedPtr<TestEthernetTap> getFirst() const
-	{
-		Mutex::Lock _l(_taps_m);
-		if (_taps.empty())
-			return SharedPtr<TestEthernetTap>();
-		return *(_taps.begin());
-	}
-
-	inline SharedPtr<TestEthernetTap> getRandom() const
-	{
-		Mutex::Lock _l(_taps_m);
-		Mutex::Lock _l2(_prng_m);
-		if (_taps.empty())
-			return SharedPtr<TestEthernetTap>();
-		unsigned int x = (const_cast<CMWC4096 *>(&_prng))->next32() % (unsigned int)_taps.size();
-		unsigned int i = 0;
-		for(std::set< SharedPtr<TestEthernetTap> >::const_iterator t(_taps.begin());t!=_taps.end();++t) {
-			if (i++ == x)
-				return *t;
-		}
-		return SharedPtr<TestEthernetTap>(); // never reached
 	}
 
 private:
-	std::set< SharedPtr<TestEthernetTap> > _taps;
+	std::set< EthernetTap * > _taps;
 	Mutex _taps_m;
 
-	std::map<std::string,SharedPtr<TestEthernetTap> > _tapsByDevice;
-	Mutex _tapsByDevice_m;
-
-	std::map<MAC,SharedPtr<TestEthernetTap> > _tapsByMac;
+	std::map< MAC,TestEthernetTap * > _tapsByMac;
 	Mutex _tapsByMac_m;
 
-	CMWC4096 _prng;
-	Mutex _prng_m;
+	std::map< uint64_t,TestEthernetTap * > _tapsByNwid;
+	Mutex _tapsByNwid_m;
 };
 
 } // namespace ZeroTier

@@ -52,16 +52,35 @@ Multicaster::~Multicaster()
 {
 }
 
+void Multicaster::addMultiple(uint64_t now,uint64_t nwid,const MulticastGroup &mg,const Address &learnedFrom,const void *addresses,unsigned int count,unsigned int totalKnown)
+{
+	const unsigned char *p = (const unsigned char *)addresses;
+	const unsigned char *e = p + (5 * count);
+	Mutex::Lock _l(_groups_m);
+	MulticastGroupStatus &gs = _groups[std::pair<uint64_t,MulticastGroup>(nwid,mg)];
+	while (p != e) {
+		_add(now,nwid,mg,gs,learnedFrom,Address(p,5));
+		p += 5;
+	}
+	if (RR->topology->isSupernode(learnedFrom))
+		gs.totalKnownMembers = totalKnown;
+}
+
 unsigned int Multicaster::gather(const Address &queryingPeer,uint64_t nwid,const MulticastGroup &mg,Packet &appendTo,unsigned int limit) const
 {
 	unsigned char *p;
 	unsigned int added = 0,i,k,rptr,totalKnown = 0;
-	uint64_t a,picked[(ZT_PROTO_MAX_PACKET_LENGTH / 5) + 1];
+	uint64_t a,picked[(ZT_PROTO_MAX_PACKET_LENGTH / 5) + 2];
 
 	if (!limit)
 		return 0;
-	if (limit > 0xffff) // TODO: multiple return packets not yet supported
+	else if (limit > 0xffff)
 		limit = 0xffff;
+
+	const unsigned int totalAt = appendTo.size();
+	appendTo.addSize(4); // sizeof(uint32_t)
+	const unsigned int addedAt = appendTo.size();
+	appendTo.addSize(2); // sizeof(uint16_t)
 
 	{ // Return myself if I am a member of this group
 		SharedPtr<Network> network(RR->nc->network(nwid));
@@ -74,20 +93,16 @@ unsigned int Multicaster::gather(const Address &queryingPeer,uint64_t nwid,const
 
 	Mutex::Lock _l(_groups_m);
 
-	const unsigned int totalAt = appendTo.size();
-	appendTo.addSize(4); // sizeof(uint32_t)
-	const unsigned int addedAt = appendTo.size();
-	appendTo.addSize(2); // sizeof(uint16_t)
-
 	std::map< std::pair<uint64_t,MulticastGroup>,MulticastGroupStatus >::const_iterator gs(_groups.find(std::pair<uint64_t,MulticastGroup>(nwid,mg)));
 	if ((gs != _groups.end())&&(!gs->second.members.empty())) {
-		totalKnown += gs->second.members.size();
+		totalKnown += (unsigned int)gs->second.members.size();
 
 		// Members are returned in random order so that repeated gather queries
 		// will return different subsets of a large multicast group.
 		k = 0;
-		while ((added < limit)&&(k < gs->second.members.size())&&((appendTo.size() + ZT_ADDRESS_LENGTH) <= ZT_PROTO_MAX_PACKET_LENGTH)) {
+		while ((added < limit)&&(k < gs->second.members.size())&&((appendTo.size() + ZT_ADDRESS_LENGTH) <= ZT_UDP_DEFAULT_PAYLOAD_MTU)) {
 			rptr = (unsigned int)RR->prng->next32();
+
 restart_member_scan:
 			a = gs->second.members[rptr % (unsigned int)gs->second.members.size()].address.toInt();
 			for(i=0;i<k;++i) {
@@ -176,22 +191,25 @@ void Multicaster::send(
 					continue;
 			}
 
-			if (count++ >= limit)
-				break;
 			out.sendOnly(RR,*ast);
+			if (++count >= limit)
+				break;
 		}
 
-		for(std::vector<MulticastGroupMember>::const_reverse_iterator m(gs.members.rbegin());m!=gs.members.rend();++m) {
-			{ // TODO / LEGACY: don't send new multicast frame to old peers (if we know their version)
-				SharedPtr<Peer> p(RR->topology->getPeer(m->address));
-				if ((p)&&(p->remoteVersionKnown())&&(p->remoteVersionMajor() < 1))
-					continue;
-			}
+		if (count < limit) {
+			for(std::vector<MulticastGroupMember>::const_reverse_iterator m(gs.members.rbegin());m!=gs.members.rend();++m) {
+				{ // TODO / LEGACY: don't send new multicast frame to old peers (if we know their version)
+					SharedPtr<Peer> p(RR->topology->getPeer(m->address));
+					if ((p)&&(p->remoteVersionKnown())&&(p->remoteVersionMajor() < 1))
+						continue;
+				}
 
-			if (count++ >= limit)
-				break;
-			if (std::find(alwaysSendTo.begin(),alwaysSendTo.end(),m->address) == alwaysSendTo.end())
-				out.sendOnly(RR,m->address);
+				if (std::find(alwaysSendTo.begin(),alwaysSendTo.end(),m->address) == alwaysSendTo.end()) {
+					out.sendOnly(RR,m->address);
+					if (++count >= limit)
+						break;
+				}
+			}
 		}
 	} else {
 		unsigned int gatherLimit = (limit - (unsigned int)gs.members.size()) + 1;
@@ -212,10 +230,6 @@ void Multicaster::send(
 				sn->send(RR,outp.data(),outp.size(),now);
 			}
 			gatherLimit = 0; // implicit not needed
-		} else if ((now - gs.lastImplicitGather) > ZT_MULTICAST_IMPLICIT_GATHER_DELAY) {
-			gs.lastImplicitGather = now;
-		} else {
-			gatherLimit = 0;
 		}
 
 		gs.txQueue.push_back(OutboundMulticast());
@@ -234,6 +248,8 @@ void Multicaster::send(
 			data,
 			len);
 
+		unsigned int count = 0;
+
 		for(std::vector<Address>::const_iterator ast(alwaysSendTo.begin());ast!=alwaysSendTo.end();++ast) {
 			{ // TODO / LEGACY: don't send new multicast frame to old peers (if we know their version)
 				SharedPtr<Peer> p(RR->topology->getPeer(*ast));
@@ -242,17 +258,24 @@ void Multicaster::send(
 			}
 
 			out.sendAndLog(RR,*ast);
+			if (++count >= limit)
+				break;
 		}
 
-		for(std::vector<MulticastGroupMember>::const_reverse_iterator m(gs.members.rbegin());m!=gs.members.rend();++m) {
-			{ // TODO / LEGACY: don't send new multicast frame to old peers (if we know their version)
-				SharedPtr<Peer> p(RR->topology->getPeer(m->address));
-				if ((p)&&(p->remoteVersionKnown())&&(p->remoteVersionMajor() < 1))
-					continue;
-			}
+		if (count < limit) {
+			for(std::vector<MulticastGroupMember>::const_reverse_iterator m(gs.members.rbegin());m!=gs.members.rend();++m) {
+				{ // TODO / LEGACY: don't send new multicast frame to old peers (if we know their version)
+					SharedPtr<Peer> p(RR->topology->getPeer(m->address));
+					if ((p)&&(p->remoteVersionKnown())&&(p->remoteVersionMajor() < 1))
+						continue;
+				}
 
-			if (std::find(alwaysSendTo.begin(),alwaysSendTo.end(),m->address) == alwaysSendTo.end())
-				out.sendAndLog(RR,m->address);
+				if (std::find(alwaysSendTo.begin(),alwaysSendTo.end(),m->address) == alwaysSendTo.end()) {
+					out.sendAndLog(RR,m->address);
+					if (++count >= limit)
+						break;
+				}
+			}
 		}
 	}
 
@@ -290,7 +313,7 @@ void Multicaster::send(
 			C25519::Signature sig(RR->identity.sign(outp.field(ZT_PROTO_VERB_P5_MULTICAST_FRAME_IDX__START_OF_SIGNED_PORTION,signedPortionLen),signedPortionLen));
 
 			outp.append((uint16_t)sig.size());
-			outp.append(sig.data,sig.size());
+			outp.append(sig.data,(unsigned int)sig.size());
 
 			if (com) com->serialize(outp);
 
@@ -316,7 +339,7 @@ void Multicaster::clean(uint64_t now)
 		// so that remaining members can be sorted in ascending order of
 		// transmit priority.
 		std::vector<MulticastGroupMember>::iterator reader(mm->second.members.begin());
-		std::vector<MulticastGroupMember>::iterator writer(mm->second.members.begin());
+		std::vector<MulticastGroupMember>::iterator writer(reader);
 		unsigned int count = 0;
 		while (reader != mm->second.members.end()) {
 			if ((now - reader->timestamp) < ZT_MULTICAST_LIKE_EXPIRE) {
@@ -328,15 +351,15 @@ void Multicaster::clean(uint64_t now)
 				 * learned peers. For peers with no active Peer record, we use the time we last learned
 				 * about them minus one day (a large constant) to put these at the bottom of the list.
 				 * List is sorted in ascending order of rank and multicasts are sent last-to-first. */
-				if (writer->learnedFrom) {
+				if (writer->learnedFrom != writer->address) {
 					SharedPtr<Peer> p(RR->topology->getPeer(writer->learnedFrom));
 					if (p)
-						writer->rank = p->lastUnicastFrame() - ZT_MULTICAST_LIKE_EXPIRE;
+						writer->rank = (RR->topology->amSupernode() ? p->lastDirectReceive() : p->lastUnicastFrame()) - ZT_MULTICAST_LIKE_EXPIRE;
 					else writer->rank = writer->timestamp - (86400000 + ZT_MULTICAST_LIKE_EXPIRE);
 				} else {
 					SharedPtr<Peer> p(RR->topology->getPeer(writer->address));
 					if (p)
-						writer->rank = p->lastUnicastFrame();
+						writer->rank = (RR->topology->amSupernode() ? p->lastDirectReceive() : p->lastUnicastFrame());
 					else writer->rank = writer->timestamp - 86400000;
 				}
 
@@ -354,7 +377,10 @@ void Multicaster::clean(uint64_t now)
 		} else if (mm->second.txQueue.empty()) {
 			// There are no remaining members and no pending multicasts, so erase the entry
 			_groups.erase(mm++);
-		} else ++mm;
+		} else {
+			mm->second.members.clear();
+			++mm;
+		}
 	}
 }
 
@@ -369,9 +395,7 @@ void Multicaster::_add(uint64_t now,uint64_t nwid,const MulticastGroup &mg,Multi
 	// Update timestamp and learnedFrom if existing
 	for(std::vector<MulticastGroupMember>::iterator m(gs.members.begin());m!=gs.members.end();++m) {
 		if (m->address == member) {
-			// learnedFrom is NULL (zero) if we've learned this directly via MULTICAST_LIKE, at which
-			// point this becomes a first-order connection.
-			if (m->learnedFrom)
+			if (m->learnedFrom != member) // once we learn it directly, remember this forever
 				m->learnedFrom = learnedFrom;
 			m->timestamp = now;
 			return;
@@ -386,17 +410,19 @@ void Multicaster::_add(uint64_t now,uint64_t nwid,const MulticastGroup &mg,Multi
 	//TRACE("..MC %s joined multicast group %.16llx/%s via %s",member.toString().c_str(),nwid,mg.toString().c_str(),((learnedFrom) ? learnedFrom.toString().c_str() : "(direct)"));
 
 	// Try to send to any outgoing multicasts that are waiting for more recipients
-	for(std::list<OutboundMulticast>::iterator tx(gs.txQueue.begin());tx!=gs.txQueue.end();) {
-		{ // TODO / LEGACY: don't send new multicast frame to old peers (if we know their version)
-			SharedPtr<Peer> p(RR->topology->getPeer(member));
-			if ((p)&&(p->remoteVersionKnown())&&(p->remoteVersionMajor() < 1))
-				continue;
+	// TODO / LEGACY: don't send new multicast frame to old peers (if we know their version)
+	SharedPtr<Peer> p(RR->topology->getPeer(member));
+	if ((!p)||(!p->remoteVersionKnown())||(p->remoteVersionMajor() >= 1)) {
+		for(std::list<OutboundMulticast>::iterator tx(gs.txQueue.begin());tx!=gs.txQueue.end();) {
+			if (tx->atLimit())
+				gs.txQueue.erase(tx++);
+			else {
+				tx->sendIfNew(RR,member);
+				if (tx->atLimit())
+					gs.txQueue.erase(tx++);
+				else ++tx;
+			}
 		}
-
-		tx->sendIfNew(RR,member);
-		if (tx->atLimit())
-			gs.txQueue.erase(tx++);
-		else ++tx;
 	}
 }
 

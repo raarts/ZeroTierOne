@@ -42,10 +42,7 @@
 
 namespace ZeroTier {
 
-static Mutex printLock;
-
 TestEthernetTap::TestEthernetTap(
-	TestEthernetTapFactory *parent,
 	const MAC &mac,
 	unsigned int mtu,
 	unsigned int metric,
@@ -55,7 +52,7 @@ TestEthernetTap::TestEthernetTap(
 	void (*handler)(void *,const MAC &,const MAC &,unsigned int,const Buffer<4096> &),
 	void *arg) :
 	EthernetTap("TestEthernetTap",mac,mtu,metric),
-	_parent(parent),
+	_nwid(nwid),
 	_handler(handler),
 	_arg(arg),
 	_enabled(true)
@@ -78,12 +75,8 @@ TestEthernetTap::TestEthernetTap(
 
 TestEthernetTap::~TestEthernetTap()
 {
-	static const TestFrame zf;
-	{
-		Mutex::Lock _l(_pq_m);
-		_pq.push(zf); // 0 length frame = exit
-	}
-	_pq_c.signal();
+	static const TestFrame zf; // use a static empty frame because of weirdo G++ warning bug...
+	_pq.push(zf); // empty frame terminates thread
 	Thread::join(_thread);
 }
 
@@ -114,9 +107,7 @@ std::set<InetAddress> TestEthernetTap::ips() const
 
 void TestEthernetTap::put(const MAC &from,const MAC &to,unsigned int etherType,const void *data,unsigned int len)
 {
-	Mutex::Lock _l(printLock);
-	fprintf(stdout,"[%s] %s << %s %.4x %s"ZT_EOL_S,_dev.c_str(),to.toString().c_str(),from.toString().c_str(),etherType,std::string((const char *)data,len).c_str());
-	fflush(stdout);
+	_gq.push(TestFrame(from,to,data,etherType,len));
 }
 
 std::string TestEthernetTap::deviceName() const
@@ -135,44 +126,24 @@ bool TestEthernetTap::updateMulticastGroups(std::set<MulticastGroup> &groups)
 
 bool TestEthernetTap::injectPacketFromHost(const MAC &from,const MAC &to,unsigned int etherType,const void *data,unsigned int len)
 {
-	if ((len == 0)||(len > 2800))
+	if ((len == 0)||(len > _mtu))
 		return false;
-
-	{
-		Mutex::Lock _l(_pq_m);
-		_pq.push(TestFrame(from,to,data,etherType & 0xffff,len));
-	}
-	_pq_c.signal();
-
-	{
-		Mutex::Lock _l(printLock);
-		fprintf(stdout,"[%s] %s >> %s %.4x %s"ZT_EOL_S,_dev.c_str(),from.toString().c_str(),to.toString().c_str(),etherType,std::string((const char *)data,len).c_str());
-		fflush(stdout);
-	}
-
+	_pq.push(TestFrame(from,to,data,etherType & 0xffff,len));
 	return true;
 }
 
 void TestEthernetTap::threadMain()
 	throw()
 {
-	TestFrame tf;
+	TestFrame f;
 	for(;;) {
-		tf.len = 0;
-		{
-			Mutex::Lock _l(_pq_m);
-			if (!_pq.empty()) {
-				if (_pq.front().len == 0)
-					break;
-				memcpy(&tf,&(_pq.front()),sizeof(tf));
-				_pq.pop();
-			}
+		if (_pq.pop(f,0)) {
+			if (f.len) {
+				try {
+					_handler(_arg,f.from,f.to,f.etherType,Buffer<4096>(f.data,f.len));
+				} catch ( ... ) {}
+			} else break;
 		}
-
-		if ((tf.len > 0)&&(_enabled))
-			_handler(_arg,tf.from,tf.to,tf.etherType,Buffer<4096>(tf.data,tf.len));
-
-		_pq_c.wait();
 	}
 }
 
