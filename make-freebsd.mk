@@ -40,13 +40,13 @@ CXXFLAGS=$(CFLAGS)
 all:	one
 
 one:	$(OBJS) main.o
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o zerotier-one main.o $(OBJS) $(LIBS)
+	$(CXX) $(CXXFLAGS) -o zerotier-one main.o $(OBJS) $(LDFLAGS) $(LIBS)
 	$(STRIP) zerotier-one
 	ln -sf zerotier-one zerotier-cli
 	ln -sf zerotier-one zerotier-idtool
 
 selftest:	$(OBJS) selftest.o
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o zerotier-selftest selftest.o $(OBJS) $(LIBS)
+	$(CXX) $(CXXFLAGS) -o zerotier-selftest selftest.o $(OBJS) $(LDFLAGS) $(LIBS)
 	$(STRIP) zerotier-selftest
 
 testnet: $(TESTNET_OBJS) $(OBJS) testnet.o
