@@ -237,7 +237,7 @@ public:
 			 * than time of last send in order to only count full round trips. */
 			if ( (std::find(_supernodeAddresses.begin(),_supernodeAddresses.end(),p->address()) == _supernodeAddresses.end()) &&
 			     ((_now - p->lastFrame()) < ZT_PEER_PATH_ACTIVITY_TIMEOUT) &&
-			     ((_now - p->lastDirectReceive()) >= ZT_PEER_DIRECT_PING_DELAY) ) {
+			     ((_now - p->lastDirectReceive()) >= 15000) ) {
 				p->sendPing(RR,_now);
 			}
 		}
@@ -273,7 +273,7 @@ public:
 			uint64_t lp = 0;
 			uint64_t lr = 0;
 			p->lastPingAndDirectReceive(lp,lr);
-			if ( (lr < RR->timeOfLastResynchronize) || ((lr < lp)&&((lp - lr) >= ZT_PING_UNANSWERED_AFTER)) || ((_now - lr) >= ZT_PEER_DIRECT_PING_DELAY) )
+			if ( (lr < RR->timeOfLastResynchronize) || ((lr < lp)&&((lp - lr) >= ZT_PING_UNANSWERED_AFTER)) || ((_now - lr) >= 15000) )
 				p->sendPing(RR,_now);
 		}
 
